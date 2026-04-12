@@ -5,13 +5,29 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 public class NativeHelper {
+    // State machine: 0=running, 1=closing, 2=cleaned
+    private static int _state = 0;
+    public static int SavedBrightness = -1;
+
+    public static bool TryBeginClose() {
+        return Interlocked.CompareExchange(ref _state, 1, 0) == 0;
+    }
+
+    public static bool IsRunning() {
+        return Interlocked.CompareExchange(ref _state, 0, 0) == 0;
+    }
+
+    public static void SetCleaned() {
+        Interlocked.Exchange(ref _state, 2);
+    }
+
     [DllImport("user32.dll")]
     public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
     public const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
 
-    // 64-bit safe window long
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
@@ -21,7 +37,6 @@ public class NativeHelper {
     public const int WS_EX_TRANSPARENT = 0x20;
     public const int WS_EX_TOOLWINDOW = 0x80;
 
-    // Layered window attributes (fix #1: make WS_EX_LAYERED actually render)
     [DllImport("user32.dll")]
     public static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint crKey, byte bAlpha, uint dwFlags);
     public const uint LWA_ALPHA = 0x02;
@@ -45,15 +60,11 @@ public class NativeHelper {
         ApplyExStyles(hWnd);
     }
 
-    // Find overlay window by title
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
     public const string OVERLAY_TITLE = "TurnOffScreen_Overlay_7F3A";
 }
 "@
-
-# State machine init (before try so catch can always access it)
-$script:state = [int[]]::new(1)
 
 # Toggle: if already running, signal to stop
 $script:mutex = New-Object System.Threading.Mutex($false, "Global\TurnOffScreenMutex")
@@ -73,7 +84,6 @@ if (-not $acquired) {
 
 try {
 
-# Clean up stale event handle from crashed instance
 if ($wasAbandoned) {
     try {
         $staleEvt = [System.Threading.EventWaitHandle]::OpenExisting("Global\TurnOffScreenEvent")
@@ -83,20 +93,23 @@ if ($wasAbandoned) {
 
 $script:evt = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Global\TurnOffScreenEvent")
 
-# Save & dim brightness (guard against no internal display)
-$script:savedBrightness = $null
+# Save & dim brightness
+$brightnessFile = Join-Path $env:TEMP "TurnOffScreen_Brightness.txt"
 $wmi = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightness -ErrorAction SilentlyContinue
 if ($wmi) {
-    $script:savedBrightness = $wmi.CurrentBrightness
-    # Previous crash may have left brightness at 0 — don't save that as restore target
-    if ($wasAbandoned -and $script:savedBrightness -eq 0) {
-        $script:savedBrightness = 80
+    $brightness = [int]$wmi.CurrentBrightness
+    if ($brightness -eq 0) {
+        if (Test-Path $brightnessFile) {
+            try { $brightness = [int](Get-Content $brightnessFile) } catch { $brightness = 80 }
+        } else { $brightness = 80 }
+        if ($brightness -le 0) { $brightness = 80 }
     }
+    [NativeHelper]::SavedBrightness = $brightness
+    [IO.File]::WriteAllText($brightnessFile, $brightness.ToString())
     $methods = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue
     if ($methods) { $methods.WmiSetBrightness(1, 0) }
 }
 
-# Helper: compute bounds covering all screens
 function Get-ScreenBounds {
     $screens = [System.Windows.Forms.Screen]::AllScreens
     $left   = ($screens | ForEach-Object { $_.Bounds.Left }   | Measure-Object -Minimum).Minimum
@@ -108,7 +121,6 @@ function Get-ScreenBounds {
 
 $bounds = Get-ScreenBounds
 
-# Fullscreen black form
 $script:form = New-Object System.Windows.Forms.Form
 $script:form.Text = 'TurnOffScreen_Overlay_7F3A'
 $script:form.StartPosition = 'Manual'
@@ -124,37 +136,35 @@ $script:form.Add_Shown({
         $bounds.Left, $bounds.Top, $bounds.Width, $bounds.Height)
 })
 
-$script:waitReg = [System.Threading.ThreadPool]::RegisterWaitForSingleObject(
-    $script:evt,
-    [System.Threading.WaitOrTimerCallback]{
-        param($s, $timedOut)
-        if ([System.Threading.Interlocked]::CompareExchange([ref]$script:state[0], 1, 0) -eq 0) {
-            try { $script:form.BeginInvoke([Action]{ $script:form.Close() }) } catch {}
+# Dismiss via UI-thread Timer polling the event (BeginInvoke from ThreadPool breaks $script: scope)
+$script:dismissTimer = New-Object System.Windows.Forms.Timer
+$script:dismissTimer.Interval = 200
+$script:dismissTimer.Add_Tick({
+    if ($script:evt.WaitOne(0)) {
+        $script:dismissTimer.Stop()
+        if ([NativeHelper]::TryBeginClose()) {
+            $script:form.Close()
         }
-    },
-    $null, -1, $true  # -1 = INFINITE timeout, $true = execute once
-)
+    }
+})
+$script:dismissTimer.Start()
 
-# Re-apply ALL flags + resize on system events
+# Re-apply flags on system events
 $script:reapplyAll = {
-    $b = Get-ScreenBounds
-    [NativeHelper]::ApplyAllFlags($script:form.Handle, $b.Left, $b.Top, $b.Width, $b.Height)
-}
-
-$script:safeReapply = {
-    if ([System.Threading.Interlocked]::CompareExchange([ref]$script:state[0], 0, 0) -eq 0) {
-        try { $script:form.BeginInvoke([Action]$script:reapplyAll) } catch {}
+    if ([NativeHelper]::IsRunning()) {
+        $b = Get-ScreenBounds
+        [NativeHelper]::ApplyAllFlags($script:form.Handle, $b.Left, $b.Top, $b.Width, $b.Height)
     }
 }
 
 $script:onPowerChange = [Microsoft.Win32.PowerModeChangedEventHandler]{
-    & $script:safeReapply
+    try { $script:form.BeginInvoke([Action]$script:reapplyAll) } catch {}
 }
 $script:onDisplayChange = [EventHandler]{
-    & $script:safeReapply
+    try { $script:form.BeginInvoke([Action]$script:reapplyAll) } catch {}
 }
 $script:onSessionSwitch = [Microsoft.Win32.SessionSwitchEventHandler]{
-    & $script:safeReapply
+    try { $script:form.BeginInvoke([Action]$script:reapplyAll) } catch {}
 }
 
 [Microsoft.Win32.SystemEvents]::add_PowerModeChanged($script:onPowerChange)
@@ -162,38 +172,39 @@ $script:onSessionSwitch = [Microsoft.Win32.SessionSwitchEventHandler]{
 [Microsoft.Win32.SystemEvents]::add_SessionSwitch($script:onSessionSwitch)
 
 $script:form.Add_FormClosed({
-    [System.Threading.Interlocked]::Exchange([ref]$script:state[0], 1) | Out-Null
-    $script:waitReg.Unregister($null)
-    [Microsoft.Win32.SystemEvents]::remove_PowerModeChanged($script:onPowerChange)
-    [Microsoft.Win32.SystemEvents]::remove_DisplaySettingsChanged($script:onDisplayChange)
-    [Microsoft.Win32.SystemEvents]::remove_SessionSwitch($script:onSessionSwitch)
-    if ($null -ne $script:savedBrightness) {
+    [NativeHelper]::TryBeginClose()
+    $script:dismissTimer.Stop()
+    $script:dismissTimer.Dispose()
+    # Restore brightness
+    $val = [NativeHelper]::SavedBrightness
+    if ($val -gt 0) {
         try {
             $m = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue
-            if ($m) { $m.WmiSetBrightness(1, $script:savedBrightness) }
+            if ($m) { $m.WmiSetBrightness(1, $val) }
         } catch {}
     }
-    $script:evt.Dispose()
-    $script:mutex.ReleaseMutex()
-    [System.Threading.Interlocked]::Exchange([ref]$script:state[0], 2) | Out-Null  # 2 = fully cleaned
-    $script:mutex.Dispose()
+    try { [Microsoft.Win32.SystemEvents]::remove_PowerModeChanged($script:onPowerChange) } catch {}
+    try { [Microsoft.Win32.SystemEvents]::remove_DisplaySettingsChanged($script:onDisplayChange) } catch {}
+    try { [Microsoft.Win32.SystemEvents]::remove_SessionSwitch($script:onSessionSwitch) } catch {}
+    try { $script:evt.Dispose() } catch {}
+    try { $script:mutex.ReleaseMutex() } catch {}
+    [NativeHelper]::SetCleaned()
+    try { $script:mutex.Dispose() } catch {}
 })
 
 [System.Windows.Forms.Application]::Run($script:form)
 
 } catch {
-    if ($null -ne $script:savedBrightness) {
+    $val = [NativeHelper]::SavedBrightness
+    if ($val -gt 0) {
         try {
             $m = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue
-            if ($m) { $m.WmiSetBrightness(1, $script:savedBrightness) }
+            if ($m) { $m.WmiSetBrightness(1, $val) }
         } catch {}
     }
     if ($script:evt) { try { $script:evt.Dispose() } catch {} }
-    $s = [System.Threading.Interlocked]::Exchange([ref]$script:state[0], 2)
-    # 0 = never started cleanup, 1 = cleanup started but didn't finish — either way, try releasing
-    if ($s -ne 2) {
-        try { $script:mutex.ReleaseMutex() } catch {}
-    }
+    try { $script:mutex.ReleaseMutex() } catch {}
+    [NativeHelper]::SetCleaned()
     $script:mutex.Dispose()
     throw
 }
