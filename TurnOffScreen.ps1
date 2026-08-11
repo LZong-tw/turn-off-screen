@@ -157,6 +157,20 @@ $script:reapplyAll = {
     }
 }
 
+# The system events below don't cover everything that can drop the flags. A dwm.exe
+# restart raises none of them, and it silently un-hides the overlay from screen capture:
+# the desktop window manager rebuilds its composition state, but WDA_EXCLUDEFROMCAPTURE
+# lives in win32k, which does NOT restart with dwm. The flag is still recorded, it just
+# stops taking effect. Remote viewers then see a black screen.
+#
+# That last detail is why this must re-apply unconditionally rather than check first:
+# GetWindowDisplayAffinity keeps reporting WDA_EXCLUDEFROMCAPTURE after a dwm restart,
+# so any "read it, patch it if it changed" guard would never fire. Don't add one.
+$script:reapplyTimer = New-Object System.Windows.Forms.Timer
+$script:reapplyTimer.Interval = 2000
+$script:reapplyTimer.Add_Tick($script:reapplyAll)
+$script:reapplyTimer.Start()
+
 $script:onPowerChange = [Microsoft.Win32.PowerModeChangedEventHandler]{
     try { $script:form.BeginInvoke([Action]$script:reapplyAll) } catch {}
 }
@@ -175,6 +189,8 @@ $script:form.Add_FormClosed({
     [NativeHelper]::TryBeginClose()
     $script:dismissTimer.Stop()
     $script:dismissTimer.Dispose()
+    $script:reapplyTimer.Stop()
+    $script:reapplyTimer.Dispose()
     # Restore brightness
     $val = [NativeHelper]::SavedBrightness
     if ($val -gt 0) {

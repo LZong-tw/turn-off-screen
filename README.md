@@ -49,6 +49,8 @@ Run `TurnOffScreen.vbs` (double-click, shortcut, or hotkey). Run it again to res
 │  │  └─ WS_EX_TOOLWINDOW (hidden from Alt+Tab)   │
 │  ├─ Subscribe to system events (power, display,  │
 │  │   session) to re-apply flags if reset          │
+│  ├─ Re-apply flags every 2s unconditionally      │
+│  │   (see "Keeping the overlay hidden" below)     │
 │  └─ Wait for dismiss signal                      │
 │                                                  │
 │  2nd run                                         │
@@ -56,6 +58,48 @@ Run `TurnOffScreen.vbs` (double-click, shortcut, or hotkey). Run it again to res
 │  └─ 1st instance closes overlay, restores bright │
 └──────────────────────────────────────────────────┘
 ```
+
+## Keeping the overlay hidden
+
+The overlay's whole trick is `WDA_EXCLUDEFROMCAPTURE`: the panel shows black, but anything
+capturing the screen — Chrome Remote Desktop, Teams, OBS — is handed the real desktop. If that
+flag stops taking effect, a remote viewer sees a black screen and, since the overlay is
+click-through and hidden from Alt+Tab, has no obvious way to get rid of it.
+
+Subscribing to `PowerModeChanged` / `DisplaySettingsChanged` / `SessionSwitch` turned out not to
+be enough. **Restarting `dwm.exe` drops the effect and raises none of those three events.** The
+desktop window manager rebuilds its composition state, and the overlay starts being captured
+again. So the flags are now also re-applied on a 2-second timer.
+
+The re-apply is deliberately **unconditional**, and that is worth explaining before someone
+tries to make it cheaper:
+
+> Display affinity is stored in win32k, not in dwm. win32k does not restart when dwm does.
+> After a dwm restart `GetWindowDisplayAffinity` still reports `WDA_EXCLUDEFROMCAPTURE`, even
+> though the flag no longer does anything. A "read the current affinity, re-apply only if it
+> changed" optimisation would therefore never fire — it would be a permanent no-op against the
+> exact failure it was meant to fix.
+
+The cost of getting this wrong is asymmetric: re-applying a flag that was already fine costs a
+handful of microseconds twice a second, while skipping one re-apply can black out a remote
+session indefinitely.
+
+## Tests
+
+```powershell
+# turn the screen off first (hotkey or TurnOffScreen.vbs), then:
+powershell -ExecutionPolicy Bypass -File tests\Test-OverlayReapply.ps1
+```
+
+`Test-OverlayReapply.ps1` clears the overlay's display affinity by hand and asserts that it comes
+back within 8 seconds. It clears the flag rather than restarting dwm because restarting dwm blanks
+the interactive session — not something a test should do to your machine. Exit codes: `0` pass,
+`1` fail, `2` skipped because the overlay wasn't running.
+
+Note what this test cannot catch: clearing the flag manually *is* visible to
+`GetWindowDisplayAffinity`, so a conditional "repair only if changed" implementation would still
+pass here while failing against a real dwm restart. The unconditional re-apply is an invariant the
+test relies on, not one it verifies.
 
 ## Known limitations
 
