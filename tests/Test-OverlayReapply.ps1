@@ -1,7 +1,7 @@
 # Regression test: the overlay must re-apply WDA_EXCLUDEFROMCAPTURE after it is lost.
 #
-# Background. The overlay hides itself from screen capture so that remote-desktop
-# viewers see the real desktop instead of the black screen. Originally the flag was
+# Background. The overlay hides itself from screen capture so that Chrome Remote
+# Desktop viewers see the real desktop instead of the black screen. Originally the flag was
 # applied once at Add_Shown and re-applied only on PowerModeChanged /
 # DisplaySettingsChanged / SessionSwitch. A dwm.exe restart raises none of those three,
 # and it does drop the effect -- so a viewer connected over Chrome Remote Desktop got a

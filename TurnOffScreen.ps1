@@ -63,6 +63,16 @@ public class NativeHelper {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
     public const string OVERLAY_TITLE = "TurnOffScreen_Overlay_7F3A";
+
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int nIndex);
+    public const int SM_REMOTESESSION = 0x1000;
+    public static bool IsRemoteSession() {
+        return GetSystemMetrics(SM_REMOTESESSION) != 0;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool DestroyIcon(IntPtr hIcon);
 }
 "@
 
@@ -92,6 +102,16 @@ if ($wasAbandoned) {
 }
 
 $script:evt = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Global\TurnOffScreenEvent")
+$script:statusFile = Join-Path $env:TEMP 'TurnOffScreen.status'
+
+# RDP remotes the composed session, so WDA_EXCLUDEFROMCAPTURE does not hide
+# this overlay. The lock screen already covers the physical panel.
+if ([NativeHelper]::IsRemoteSession()) {
+    try { $script:evt.Dispose() } catch {}
+    try { $script:mutex.ReleaseMutex() } catch {}
+    $script:mutex.Dispose()
+    exit 0
+}
 
 # Save & dim brightness
 $brightnessFile = Join-Path $env:TEMP "TurnOffScreen_Brightness.txt"
@@ -136,6 +156,27 @@ $script:form.Add_Shown({
         $bounds.Left, $bounds.Top, $bounds.Width, $bounds.Height)
 })
 
+# Tray icon is NOT capture-excluded, so Chrome Remote Desktop can see it.
+$script:iconBmp = New-Object System.Drawing.Bitmap 16, 16
+$g = [System.Drawing.Graphics]::FromImage($script:iconBmp)
+$g.Clear([System.Drawing.Color]::FromArgb(0, 0, 0, 0))
+$g.FillEllipse([System.Drawing.Brushes]::Black, 1, 1, 13, 13)
+$g.DrawEllipse([System.Drawing.Pens]::White, 1, 1, 13, 13)
+$g.Dispose()
+$script:iconHandle = $script:iconBmp.GetHicon()
+$script:notifyIcon = New-Object System.Windows.Forms.NotifyIcon
+$script:notifyIcon.Icon = [System.Drawing.Icon]::FromHandle($script:iconHandle)
+$script:notifyIcon.Text = 'Turn Off Screen: ON'
+$script:notifyIcon.Visible = $true
+$script:notifyMenu = New-Object System.Windows.Forms.ContextMenuStrip
+[void]$script:notifyMenu.Items.Add('Restore screen', $null, { $script:evt.Set() })
+$script:notifyIcon.ContextMenuStrip = $script:notifyMenu
+$script:notifyIcon.Add_MouseUp({
+    param($sender, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { $script:evt.Set() }
+})
+Set-Content -Path $script:statusFile -Value 'on' -Encoding ASCII
+
 # Dismiss via UI-thread Timer polling the event (BeginInvoke from ThreadPool breaks $script: scope)
 $script:dismissTimer = New-Object System.Windows.Forms.Timer
 $script:dismissTimer.Interval = 200
@@ -149,12 +190,18 @@ $script:dismissTimer.Add_Tick({
 })
 $script:dismissTimer.Start()
 
-# Re-apply flags on system events
+$script:requestDismiss = {
+    $script:evt.Set()
+}
+
 $script:reapplyAll = {
-    if ([NativeHelper]::IsRunning()) {
-        $b = Get-ScreenBounds
-        [NativeHelper]::ApplyAllFlags($script:form.Handle, $b.Left, $b.Top, $b.Width, $b.Height)
+    if (-not [NativeHelper]::IsRunning()) { return }
+    if ([NativeHelper]::IsRemoteSession()) {
+        & $script:requestDismiss
+        return
     }
+    $b = Get-ScreenBounds
+    [NativeHelper]::ApplyAllFlags($script:form.Handle, $b.Left, $b.Top, $b.Width, $b.Height)
 }
 
 # The system events below don't cover everything that can drop the flags. A dwm.exe
@@ -178,7 +225,17 @@ $script:onDisplayChange = [EventHandler]{
     try { $script:form.BeginInvoke([Action]$script:reapplyAll) } catch {}
 }
 $script:onSessionSwitch = [Microsoft.Win32.SessionSwitchEventHandler]{
-    try { $script:form.BeginInvoke([Action]$script:reapplyAll) } catch {}
+    param($sender, $e)
+    try {
+        if ([NativeHelper]::IsRemoteSession() -or
+            $e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::RemoteConnect -or
+            $e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::SessionRemoteControl -or
+            $e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::ConsoleDisconnect) {
+            $script:form.BeginInvoke([Action]$script:requestDismiss)
+        } else {
+            $script:form.BeginInvoke([Action]$script:reapplyAll)
+        }
+    } catch {}
 }
 
 [Microsoft.Win32.SystemEvents]::add_PowerModeChanged($script:onPowerChange)
@@ -191,6 +248,16 @@ $script:form.Add_FormClosed({
     $script:dismissTimer.Dispose()
     $script:reapplyTimer.Stop()
     $script:reapplyTimer.Dispose()
+    if ($script:notifyIcon) {
+        $script:notifyIcon.Visible = $false
+        $script:notifyIcon.Dispose()
+    }
+    if ($script:notifyMenu) { $script:notifyMenu.Dispose() }
+    if ($script:iconHandle -and $script:iconHandle -ne [IntPtr]::Zero) {
+        [void][NativeHelper]::DestroyIcon($script:iconHandle)
+    }
+    if ($script:iconBmp) { $script:iconBmp.Dispose() }
+    if ($script:statusFile) { Set-Content -Path $script:statusFile -Value 'off' -Encoding ASCII }
     # Restore brightness
     $val = [NativeHelper]::SavedBrightness
     if ($val -gt 0) {
