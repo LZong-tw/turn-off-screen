@@ -71,10 +71,54 @@ public class NativeHelper {
         return GetSystemMetrics(SM_REMOTESESSION) != 0;
     }
 
+    [DllImport("kernel32.dll")]
+    public static extern uint WTSGetActiveConsoleSessionId();
+    [DllImport("kernel32.dll")]
+    public static extern bool ProcessIdToSessionId(uint pid, out uint sessionId);
+
+    // Test seam: while this file exists, the session is treated as remote.
+    public static string FakeRemoteFlag = null;
+
+    // 1 = our session is not on the physical console (RDP, connected or disconnected),
+    // 0 = it is, -1 = unknown (the console is mid-switch). A disconnected RDP session is
+    // not "remote" to SM_REMOTESESSION, which is why the session ids are compared too.
+    public static int ConsoleState() {
+        if (FakeRemoteFlag != null && System.IO.File.Exists(FakeRemoteFlag)) return 1;
+        if (IsRemoteSession()) return 1;
+        uint console = WTSGetActiveConsoleSessionId();
+        if (console == 0xFFFFFFFF) return -1;
+        uint mine;
+        if (!ProcessIdToSessionId((uint)System.Diagnostics.Process.GetCurrentProcess().Id, out mine)) return -1;
+        return mine == console ? 0 : 1;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool DestroyIcon(IntPtr hIcon);
 }
 "@
+
+if ($env:TURNOFFSCREEN_FAKE_REMOTE_FLAG) { [NativeHelper]::FakeRemoteFlag = $env:TURNOFFSCREEN_FAKE_REMOTE_FLAG }
+
+$script:logFile = Join-Path $env:LOCALAPPDATA 'TurnOffScreen\TurnOffScreen.log'
+function Write-Log([string]$msg) {
+    try {
+        $dir = Split-Path $script:logFile
+        if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        if ((Test-Path $script:logFile) -and (Get-Item $script:logFile).Length -gt 256KB) {
+            Move-Item $script:logFile "$script:logFile.old" -Force
+        }
+        Add-Content -Path $script:logFile -Value ("{0} [{1}] {2}" -f (Get-Date -Format s), $PID, $msg) -Encoding UTF8
+    } catch {}
+}
+
+function Set-PanelBrightness([int]$level) {
+    try {
+        $m = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue
+        if (-not $m) { Write-Log "brightness -> ${level}: WmiMonitorBrightnessMethods unavailable"; return }
+        [void]$m.WmiSetBrightness(1, $level)
+        Write-Log "brightness -> $level"
+    } catch { Write-Log "brightness -> $level failed: $_" }
+}
 
 # Toggle: if already running, signal to stop
 $script:mutex = New-Object System.Threading.Mutex($false, "Global\TurnOffScreenMutex")
@@ -104,14 +148,13 @@ if ($wasAbandoned) {
 $script:evt = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "Global\TurnOffScreenEvent")
 $script:statusFile = Join-Path $env:TEMP 'TurnOffScreen.status'
 
-# RDP remotes the composed session, so WDA_EXCLUDEFROMCAPTURE does not hide
-# this overlay. The lock screen already covers the physical panel.
-if ([NativeHelper]::IsRemoteSession()) {
-    try { $script:evt.Dispose() } catch {}
-    try { $script:mutex.ReleaseMutex() } catch {}
-    $script:mutex.Dispose()
-    exit 0
-}
+# RDP remotes the composed session, so WDA_EXCLUDEFROMCAPTURE cannot hide the overlay
+# from an RDP viewer. While the session is away from the console we run in "remote mode":
+# overlay hidden, brightness kept at 0. The physical panel then shows the console lock
+# screen, which this session cannot draw over, so dim is as dark as it gets.
+$script:remoteMode = $false
+$script:startRemote = ([NativeHelper]::ConsoleState() -eq 1)
+Write-Log ("start: remote={0} SM_REMOTESESSION={1} abandoned={2}" -f $script:startRemote, [NativeHelper]::IsRemoteSession(), $wasAbandoned)
 
 # Save & dim brightness
 $brightnessFile = Join-Path $env:TEMP "TurnOffScreen_Brightness.txt"
@@ -128,6 +171,7 @@ if ($wmi) {
     [IO.File]::WriteAllText($brightnessFile, $brightness.ToString())
     $methods = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue
     if ($methods) { $methods.WmiSetBrightness(1, 0) }
+    Write-Log "saved brightness $brightness, dimmed to 0"
 }
 
 function Get-ScreenBounds {
@@ -151,7 +195,14 @@ $script:form.FormBorderStyle = 'None'
 $script:form.TopMost = $true
 $script:form.ShowInTaskbar = $false
 
+# Launched from inside RDP: never let the black form paint in the remote session.
+if ($script:startRemote) { $script:form.Opacity = 0 }
+
 $script:form.Add_Shown({
+    if ($script:startRemote) {
+        & $script:enterRemoteMode
+        return
+    }
     [NativeHelper]::ApplyAllFlags($script:form.Handle,
         $bounds.Left, $bounds.Top, $bounds.Width, $bounds.Height)
 })
@@ -194,10 +245,27 @@ $script:requestDismiss = {
     $script:evt.Set()
 }
 
+$script:enterRemoteMode = {
+    $script:remoteMode = $true
+    $script:form.Hide()
+    Set-PanelBrightness 0
+    $script:notifyIcon.Text = 'Turn Off Screen: ON (remote)'
+    Write-Log 'entered remote mode'
+}
+
 $script:reapplyAll = {
     if (-not [NativeHelper]::IsRunning()) { return }
-    if ([NativeHelper]::IsRemoteSession()) {
-        & $script:requestDismiss
+    $state = [NativeHelper]::ConsoleState()
+    if ($state -eq 1) {
+        if (-not $script:remoteMode) { & $script:enterRemoteMode }
+        return
+    }
+    if ($script:remoteMode) {
+        # Back on the physical console means someone signed in at the machine.
+        if ($state -eq 0) {
+            Write-Log 'session back on console, dismissing'
+            & $script:requestDismiss
+        }
         return
     }
     $b = Get-ScreenBounds
@@ -226,16 +294,8 @@ $script:onDisplayChange = [EventHandler]{
 }
 $script:onSessionSwitch = [Microsoft.Win32.SessionSwitchEventHandler]{
     param($sender, $e)
-    try {
-        if ([NativeHelper]::IsRemoteSession() -or
-            $e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::RemoteConnect -or
-            $e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::SessionRemoteControl -or
-            $e.Reason -eq [Microsoft.Win32.SessionSwitchReason]::ConsoleDisconnect) {
-            $script:form.BeginInvoke([Action]$script:requestDismiss)
-        } else {
-            $script:form.BeginInvoke([Action]$script:reapplyAll)
-        }
-    } catch {}
+    try { Write-Log "SessionSwitch $($e.Reason) consoleState=$([NativeHelper]::ConsoleState())" } catch {}
+    try { $script:form.BeginInvoke([Action]$script:reapplyAll) } catch {}
 }
 
 [Microsoft.Win32.SystemEvents]::add_PowerModeChanged($script:onPowerChange)
@@ -258,14 +318,9 @@ $script:form.Add_FormClosed({
     }
     if ($script:iconBmp) { $script:iconBmp.Dispose() }
     if ($script:statusFile) { Set-Content -Path $script:statusFile -Value 'off' -Encoding ASCII }
-    # Restore brightness
     $val = [NativeHelper]::SavedBrightness
-    if ($val -gt 0) {
-        try {
-            $m = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue
-            if ($m) { $m.WmiSetBrightness(1, $val) }
-        } catch {}
-    }
+    if ($val -gt 0) { Set-PanelBrightness $val }
+    Write-Log 'dismissed'
     try { [Microsoft.Win32.SystemEvents]::remove_PowerModeChanged($script:onPowerChange) } catch {}
     try { [Microsoft.Win32.SystemEvents]::remove_DisplaySettingsChanged($script:onDisplayChange) } catch {}
     try { [Microsoft.Win32.SystemEvents]::remove_SessionSwitch($script:onSessionSwitch) } catch {}
@@ -278,13 +333,9 @@ $script:form.Add_FormClosed({
 [System.Windows.Forms.Application]::Run($script:form)
 
 } catch {
+    Write-Log "crashed: $_"
     $val = [NativeHelper]::SavedBrightness
-    if ($val -gt 0) {
-        try {
-            $m = Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods -ErrorAction SilentlyContinue
-            if ($m) { $m.WmiSetBrightness(1, $val) }
-        } catch {}
-    }
+    if ($val -gt 0) { Set-PanelBrightness $val }
     if ($script:evt) { try { $script:evt.Dispose() } catch {} }
     try { $script:mutex.ReleaseMutex() } catch {}
     [NativeHelper]::SetCleaned()

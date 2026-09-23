@@ -9,7 +9,7 @@ Software screen-off for Windows laptops where `SC_MONITORPOWER` is intercepted b
 - Overlay is invisible to screen capture (`WDA_EXCLUDEFROMCAPTURE`) — Chrome Remote Desktop sees the normal desktop
 - Overlay is click-through (`WS_EX_TRANSPARENT`) — remote desktop input works normally
 - A tray icon (not capture-excluded) shows that the overlay is ON; click it or run the script again to restore
-- RDP is a composed session, not a capture API, so the overlay auto-dismisses when an RDP session connects (the local lock screen already covers the panel)
+- RDP is a composed session, not a capture API, so while you are connected over RDP the overlay hides itself but brightness stays at 0; it turns off once someone signs in at the laptop itself
 - Toggle: run once to activate, run again to deactivate and restore brightness
 
 ## Requirements
@@ -42,7 +42,7 @@ The black overlay is hidden from screen capture, so Chrome Remote Desktop will n
 
 Click the tray icon (or its `Restore screen` menu) to turn it off from remote.
 
-Windows App / RDP: the overlay closes itself when the RDP session connects. If you can see the desktop, it is off. Do not use this overlay as privacy for RDP — RDP already locks the local console.
+Windows App / RDP: the overlay hides itself while the session is remote (you see the desktop), but the panel stays at brightness 0 and the tray icon tooltip reads `Turn Off Screen: ON (remote)`. It also works when started from inside RDP. It restores brightness and exits when someone signs in at the physical console, or when you toggle it off.
 
 ### Hotkey binding
 
@@ -81,7 +81,8 @@ Windows App / RDP: the overlay closes itself when the RDP session connects. If y
 The overlay's whole trick is `WDA_EXCLUDEFROMCAPTURE`: the panel shows black, but anything
 capturing the screen — Chrome Remote Desktop, Teams, OBS — is handed the real desktop. **RDP is
 not a capture API**; it remotes the composed session, so the same overlay would black out an
-RDP viewer. On RDP connect the overlay exits instead.
+RDP viewer. While the session is away from the physical console the overlay hides and only the
+brightness stays down; the console shows its own lock screen, which this session cannot draw over.
 
 If the capture flag stops taking effect, a Chrome Remote Desktop viewer sees a black screen and,
 since the overlay is click-through and hidden from Alt+Tab, has no obvious way to get rid of it.
@@ -126,7 +127,7 @@ test relies on, not one it verifies.
 - Chrome Remote Desktop's sharing bar, IME candidate windows, and the mouse cursor may remain faintly visible at brightness 0 (they render above the overlay in z-order; hiding them breaks remote desktop)
 - Not a true DPMS off — the panel is still powered, just at minimum backlight with a black image
 - 64-bit PowerShell only (`GetWindowLongPtrW` is not exported on 32-bit)
-- Windows App / native RDP cannot hide this overlay the way Chrome Remote Desktop can; RDP auto-dismisses it instead
+- Windows App / native RDP cannot hide this overlay the way Chrome Remote Desktop can; over RDP only the brightness is kept at 0
 
 ## Why not just use SC_MONITORPOWER?
 
