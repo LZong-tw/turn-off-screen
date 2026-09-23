@@ -9,6 +9,7 @@ Software screen-off for Windows laptops where `SC_MONITORPOWER` is intercepted b
 - Overlay is invisible to screen capture (`WDA_EXCLUDEFROMCAPTURE`) — Chrome Remote Desktop sees the normal desktop
 - Overlay is click-through (`WS_EX_TRANSPARENT`) — remote desktop input works normally
 - A tray icon (not capture-excluded) shows that the overlay is ON; click it or run the script again to restore
+- A notification pops up when the screen turns off, when an RDP session connects while it is off, and when it is restored (Focus Assist may suppress it)
 - RDP is a composed session, not a capture API, so while you are connected over RDP the overlay hides itself but brightness stays at 0; it turns off once someone signs in at the laptop itself
 - Toggle: run once to activate, run again to deactivate and restore brightness
 

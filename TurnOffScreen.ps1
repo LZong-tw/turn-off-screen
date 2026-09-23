@@ -228,6 +228,13 @@ $script:notifyIcon.Add_MouseUp({
 })
 Set-Content -Path $script:statusFile -Value 'on' -Encoding ASCII
 
+function Show-Notice([string]$title, [string]$text) {
+    try { $script:notifyIcon.ShowBalloonTip(4000, $title, $text, [System.Windows.Forms.ToolTipIcon]::Info) } catch {}
+}
+if (-not $script:startRemote) {
+    Show-Notice 'Screen off' 'Click this icon or toggle again to restore.'
+}
+
 # Dismiss via UI-thread Timer polling the event (BeginInvoke from ThreadPool breaks $script: scope)
 $script:dismissTimer = New-Object System.Windows.Forms.Timer
 $script:dismissTimer.Interval = 200
@@ -250,6 +257,7 @@ $script:enterRemoteMode = {
     $script:form.Hide()
     Set-PanelBrightness 0
     $script:notifyIcon.Text = 'Turn Off Screen: ON (remote)'
+    Show-Notice 'Screen off (remote)' 'Laptop panel is dark. Click this icon to restore it.'
     Write-Log 'entered remote mode'
 }
 
@@ -308,15 +316,6 @@ $script:form.Add_FormClosed({
     $script:dismissTimer.Dispose()
     $script:reapplyTimer.Stop()
     $script:reapplyTimer.Dispose()
-    if ($script:notifyIcon) {
-        $script:notifyIcon.Visible = $false
-        $script:notifyIcon.Dispose()
-    }
-    if ($script:notifyMenu) { $script:notifyMenu.Dispose() }
-    if ($script:iconHandle -and $script:iconHandle -ne [IntPtr]::Zero) {
-        [void][NativeHelper]::DestroyIcon($script:iconHandle)
-    }
-    if ($script:iconBmp) { $script:iconBmp.Dispose() }
     if ($script:statusFile) { Set-Content -Path $script:statusFile -Value 'off' -Encoding ASCII }
     $val = [NativeHelper]::SavedBrightness
     if ($val -gt 0) { Set-PanelBrightness $val }
@@ -331,6 +330,17 @@ $script:form.Add_FormClosed({
 })
 
 [System.Windows.Forms.Application]::Run($script:form)
+
+# The mutex is already released, so a new toggle can start while this notice
+# is up. Windows removes the notice together with its icon, hence the wait.
+$script:notifyIcon.Text = 'Turn Off Screen: OFF'
+Show-Notice 'Screen restored' 'Brightness is back.'
+Start-Sleep -Seconds 4
+$script:notifyIcon.Visible = $false
+$script:notifyIcon.Dispose()
+$script:notifyMenu.Dispose()
+[void][NativeHelper]::DestroyIcon($script:iconHandle)
+$script:iconBmp.Dispose()
 
 } catch {
     Write-Log "crashed: $_"
