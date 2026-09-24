@@ -26,6 +26,8 @@ public class NativeHelper {
 
     [DllImport("user32.dll")]
     public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowDisplayAffinity(IntPtr hWnd, out uint dwAffinity);
     public const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
@@ -98,6 +100,10 @@ public class NativeHelper {
 "@
 
 if ($env:TURNOFFSCREEN_FAKE_REMOTE_FLAG) { [NativeHelper]::FakeRemoteFlag = $env:TURNOFFSCREEN_FAKE_REMOTE_FLAG }
+# Test seam: dropping this file makes the overlay clear its own capture flag
+# once. Only the owning process may change display affinity (others get
+# ERROR_ACCESS_DENIED), so a test cannot do it from outside.
+$script:fakeLossFlag = $env:TURNOFFSCREEN_FAKE_AFFINITY_LOSS_FLAG
 
 $script:logFile = Join-Path $env:LOCALAPPDATA 'TurnOffScreen\TurnOffScreen.log'
 function Write-Log([string]$msg) {
@@ -239,6 +245,13 @@ if (-not $script:startRemote) {
 $script:dismissTimer = New-Object System.Windows.Forms.Timer
 $script:dismissTimer.Interval = 200
 $script:dismissTimer.Add_Tick({
+    if ($script:fakeLossFlag -and (Test-Path $script:fakeLossFlag)) {
+        Remove-Item $script:fakeLossFlag -ErrorAction SilentlyContinue
+        [void][NativeHelper]::SetWindowDisplayAffinity($script:form.Handle, 0)
+        $now = 0
+        [void][NativeHelper]::GetWindowDisplayAffinity($script:form.Handle, [ref]$now)
+        Write-Log ("simulated affinity loss, now 0x{0:X}" -f $now)
+    }
     if ($script:evt.WaitOne(0)) {
         $script:dismissTimer.Stop()
         if ([NativeHelper]::TryBeginClose()) {

@@ -109,14 +109,24 @@ session indefinitely.
 ## Tests
 
 ```powershell
-# turn the screen off first (hotkey or TurnOffScreen.vbs), then:
+# with the screen-off overlay NOT running (each test starts and stops its own):
 powershell -ExecutionPolicy Bypass -File tests\Test-OverlayReapply.ps1
+powershell -ExecutionPolicy Bypass -File tests\Test-RemoteMode.ps1
 ```
 
-`Test-OverlayReapply.ps1` clears the overlay's display affinity by hand and asserts that it comes
-back within 8 seconds. It clears the flag rather than restarting dwm because restarting dwm blanks
-the interactive session — not something a test should do to your machine. Exit codes: `0` pass,
-`1` fail, `2` skipped because the overlay wasn't running.
+Both dim and black out the local screen for a few seconds. Exit codes: `0` pass, `1` fail, `2`
+skipped (an overlay was already running, or there is no WMI brightness).
+
+`Test-OverlayReapply.ps1` makes the overlay clear its own display affinity and asserts that it comes
+back within 8 seconds. The clear has to happen inside the overlay process: Windows refuses
+`SetWindowDisplayAffinity` on another process's window (error 5), so the test drops a file named by
+`TURNOFFSCREEN_FAKE_AFFINITY_LOSS_FLAG` and the overlay reacts to it. It clears the flag rather than
+restarting dwm because restarting dwm blanks the interactive session — not something a test should
+do to your machine.
+
+`Test-RemoteMode.ps1` covers RDP: launched while remote, and going remote while the overlay is up.
+A real RDP connection can't be scripted, so `TURNOFFSCREEN_FAKE_REMOTE_FLAG` makes the script treat
+the session as remote.
 
 Note what this test cannot catch: clearing the flag manually *is* visible to
 `GetWindowDisplayAffinity`, so a conditional "repair only if changed" implementation would still
