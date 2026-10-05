@@ -16,11 +16,9 @@
 # win32 error 5. So the clear happens inside the overlay, triggered by the file named in
 # TURNOFFSCREEN_FAKE_AFFINITY_LOSS_FLAG. The check reads the affinity from out here.
 #
-# The re-apply is unconditional on a timer for a reason this test cannot cover: after a
-# dwm restart win32k still reports WDA_EXCLUDEFROMCAPTURE even though it no longer has
-# any effect, so a "check, then repair if changed" guard would be a permanent no-op. A
-# manual clear IS visible to the getter, so a conditional implementation would still
-# pass here. Keep the invariant in mind when changing TurnOffScreen.ps1.
+# This test cannot reproduce a real dwm restart: after one, win32k still reports
+# WDA_EXCLUDEFROMCAPTURE and setting the same value again does nothing. A manual clear IS
+# visible to win32k, so plain re-apply passes here. Test-DwmRestart.ps1 covers that case.
 #
 # The test starts and stops its own overlay; the local screen goes dark for a few seconds.
 # Exit codes: 0 pass, 1 fail, 2 skipped (overlay already running, or no WMI brightness).

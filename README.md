@@ -67,7 +67,8 @@ Windows App / RDP: the overlay hides itself while the session is remote (you see
 │  │  └─ WS_EX_TOOLWINDOW (hidden from Alt+Tab)   │
 │  ├─ Subscribe to system events (power, display,  │
 │  │   session) to re-apply flags if reset          │
-│  ├─ Re-apply flags every 2s unconditionally      │
+│  ├─ Every 2s: re-apply flags; if dwm.exe was     │
+│  │   restarted, clear and re-set capture flag     │
 │  │   (see "Keeping the overlay hidden" below)     │
 │  └─ Wait for dismiss signal                      │
 │                                                  │
@@ -88,23 +89,19 @@ brightness stays down; the console shows its own lock screen, which this session
 If the capture flag stops taking effect, a Chrome Remote Desktop viewer sees a black screen and,
 since the overlay is click-through and hidden from Alt+Tab, has no obvious way to get rid of it.
 
-Subscribing to `PowerModeChanged` / `DisplaySettingsChanged` / `SessionSwitch` turned out not to
-be enough. **Restarting `dwm.exe` drops the effect and raises none of those three events.** The
-desktop window manager rebuilds its composition state, and the overlay starts being captured
-again. So the flags are now also re-applied on a 2-second timer.
+The way it stops taking effect in practice is a **`dwm.exe` restart**. dwm crashes under memory
+exhaustion (`0xc00001ad`) and Windows restarts it; that raises none of `PowerModeChanged` /
+`DisplaySettingsChanged` / `SessionSwitch`, and afterwards the overlay is captured again.
 
-The re-apply is deliberately **unconditional**, and that is worth explaining before someone
-tries to make it cheaper:
-
-> Display affinity is stored in win32k, not in dwm. win32k does not restart when dwm does.
+> Display affinity is stored in win32k, not in dwm, and win32k does not restart when dwm does.
 > After a dwm restart `GetWindowDisplayAffinity` still reports `WDA_EXCLUDEFROMCAPTURE`, even
-> though the flag no longer does anything. A "read the current affinity, re-apply only if it
-> changed" optimisation would therefore never fire — it would be a permanent no-op against the
-> exact failure it was meant to fix.
+> though the flag no longer does anything. Setting the same value again is a no-op: an earlier
+> version re-applied it every 2 seconds and the overlay stayed captured indefinitely
+> (`tests/Test-DwmRestart.ps1` reproduced this with a real dwm restart).
 
-The cost of getting this wrong is asymmetric: re-applying a flag that was already fine costs a
-handful of microseconds twice a second, while skipping one re-apply can black out a remote
-session indefinitely.
+What works is clearing the flag and setting it again. The overlay watches its session's dwm
+process id on a 2-second timer and does exactly that when it changes, logging
+`dwm restarted (old -> new)`.
 
 ## Tests
 
@@ -112,26 +109,25 @@ session indefinitely.
 # with the screen-off overlay NOT running (each test starts and stops its own):
 powershell -ExecutionPolicy Bypass -File tests\Test-OverlayReapply.ps1
 powershell -ExecutionPolicy Bypass -File tests\Test-RemoteMode.ps1
+# at the physical console; shows a UAC prompt to kill dwm.exe:
+powershell -ExecutionPolicy Bypass -File tests\Test-DwmRestart.ps1
 ```
 
-Both dim and black out the local screen for a few seconds. Exit codes: `0` pass, `1` fail, `2`
+All of them dim and black out the local screen for a few seconds. Exit codes: `0` pass, `1` fail, `2`
 skipped (an overlay was already running, or there is no WMI brightness).
 
 `Test-OverlayReapply.ps1` makes the overlay clear its own display affinity and asserts that it comes
 back within 8 seconds. The clear has to happen inside the overlay process: Windows refuses
 `SetWindowDisplayAffinity` on another process's window (error 5), so the test drops a file named by
-`TURNOFFSCREEN_FAKE_AFFINITY_LOSS_FLAG` and the overlay reacts to it. It clears the flag rather than
-restarting dwm because restarting dwm blanks the interactive session — not something a test should
-do to your machine.
+`TURNOFFSCREEN_FAKE_AFFINITY_LOSS_FLAG` and the overlay reacts to it. A manual clear *is* visible
+to win32k, so this test cannot reproduce the dwm-restart failure; `Test-DwmRestart.ps1` does.
+
+`Test-DwmRestart.ps1` kills dwm for real and checks a GDI screen grab: the overlay must not show up
+as a black frame 8 seconds after the restart. The screen flickers once.
 
 `Test-RemoteMode.ps1` covers RDP: launched while remote, and going remote while the overlay is up.
 A real RDP connection can't be scripted, so `TURNOFFSCREEN_FAKE_REMOTE_FLAG` makes the script treat
 the session as remote.
-
-Note what this test cannot catch: clearing the flag manually *is* visible to
-`GetWindowDisplayAffinity`, so a conditional "repair only if changed" implementation would still
-pass here while failing against a real dwm restart. The unconditional re-apply is an invariant the
-test relies on, not one it verifies.
 
 ## Known limitations
 

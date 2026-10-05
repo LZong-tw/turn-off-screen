@@ -274,6 +274,12 @@ $script:enterRemoteMode = {
     Write-Log 'entered remote mode'
 }
 
+$script:mySession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+function Get-SessionDwmId {
+    (Get-Process dwm -ErrorAction SilentlyContinue | Where-Object SessionId -eq $script:mySession | Select-Object -First 1).Id
+}
+$script:dwmId = Get-SessionDwmId
+
 $script:reapplyAll = {
     if (-not [NativeHelper]::IsRunning()) { return }
     $state = [NativeHelper]::ConsoleState()
@@ -291,17 +297,23 @@ $script:reapplyAll = {
     }
     $b = Get-ScreenBounds
     [NativeHelper]::ApplyAllFlags($script:form.Handle, $b.Left, $b.Top, $b.Width, $b.Height)
+
+    # A dwm.exe restart (it crashes under memory exhaustion) silently un-hides the
+    # overlay from screen capture, and Chrome Remote Desktop viewers see a black screen.
+    # WDA_EXCLUDEFROMCAPTURE lives in win32k, which does not restart with dwm, so the
+    # getter still reports it and setting the same value again is a no-op -- the
+    # re-apply above does nothing here. Clearing it and setting it again does work.
+    $dwm = Get-SessionDwmId
+    if ($script:dwmId -and $dwm -and $dwm -ne $script:dwmId) {
+        [void][NativeHelper]::SetWindowDisplayAffinity($script:form.Handle, 0)
+        [void][NativeHelper]::SetWindowDisplayAffinity($script:form.Handle, [NativeHelper]::WDA_EXCLUDEFROMCAPTURE)
+        Write-Log "dwm restarted ($($script:dwmId) -> $dwm), re-armed capture exclusion"
+    }
+    if ($dwm) { $script:dwmId = $dwm }
 }
 
-# The system events below don't cover everything that can drop the flags. A dwm.exe
-# restart raises none of them, and it silently un-hides the overlay from screen capture:
-# the desktop window manager rebuilds its composition state, but WDA_EXCLUDEFROMCAPTURE
-# lives in win32k, which does NOT restart with dwm. The flag is still recorded, it just
-# stops taking effect. Remote viewers then see a black screen.
-#
-# That last detail is why this must re-apply unconditionally rather than check first:
-# GetWindowDisplayAffinity keeps reporting WDA_EXCLUDEFROMCAPTURE after a dwm restart,
-# so any "read it, patch it if it changed" guard would never fire. Don't add one.
+# None of the system events below fire on a dwm restart, so the flags are also
+# re-applied, and dwm watched, on a timer.
 $script:reapplyTimer = New-Object System.Windows.Forms.Timer
 $script:reapplyTimer.Interval = 2000
 $script:reapplyTimer.Add_Tick($script:reapplyAll)
