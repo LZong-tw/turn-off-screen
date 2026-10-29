@@ -1,8 +1,24 @@
 # Turn Off Screen
 
-Software screen-off for Windows laptops where `SC_MONITORPOWER` is intercepted by vendor drivers (e.g., ASUS ExpertBook triggers lock screen instead of turning off the display).
+Two screen-off modes for Windows desktops and laptops: native display standby, and a persistent black overlay for hardware where `SC_MONITORPOWER` is intercepted by vendor drivers (e.g., ASUS ExpertBook triggers lock screen instead of turning off the display).
 
-## What it does
+## Desktop control window
+
+Install creates a **螢幕控制** (Screen Control) shortcut with three actions:
+
+| Action | Effect | Restore |
+|---|---|---|
+| 真正關屏 | Requests native display standby after two seconds; the computer keeps working | Move the mouse, press a key, or use Restore |
+| 夜間黑幕 | Keeps a black overlay on the local desktop; dims internal panels when WMI supports it | Restore button or **Ctrl+Alt+Shift+M** |
+| 恢復螢幕 | Explicitly dismisses the overlay and requests native display power on | Idempotent; safe to repeat |
+
+The window shows Windows display-power notifications separately from overlay state. A successful request is **not** treated as proof that physical monitors turned off: `MonitorPower.ps1` records actual Windows `On`/`Off`/`Dim` notifications, and hardware still needs a physical check. The native mode was physically verified on a three-external-monitor desktop.
+
+The overlay remains active if the control window closes. The overlay process directly registers **Ctrl+Alt+Shift+M** to restore, so this key does not depend on Explorer's desktop-shortcut registration or keeping the control window open. If another app owns the combination, a notification and log entry report the conflict; use the tray restore action or the **恢復螢幕** desktop shortcut instead.
+
+PowerToys Awake can prevent automatic display-off when **Keep screen on** is enabled. Keep Awake enabled if desired, but disable that separate display option; it overrides the display timeout without changing the power plan. This utility does not silently change PowerToys settings.
+
+## What overlay mode does
 
 - Sets display brightness to 0 via WMI (saves power)
 - Shows a fullscreen black overlay window (prevents burn-in)
@@ -17,7 +33,8 @@ Software screen-off for Windows laptops where `SC_MONITORPOWER` is intercepted b
 
 - Windows 10 2004+ or Windows 11
 - 64-bit PowerShell 5.1 (ships with Windows)
-- Internal display with WMI brightness support (most laptops)
+- WMI brightness support is optional for the overlay; external monitors use the black image without brightness control
+- Native display standby depends on Windows, GPU and monitor support; use the overlay on affected ASUS laptops
 
 ## Install
 
@@ -27,9 +44,28 @@ powershell -ExecutionPolicy Bypass -File Install.ps1
 
 This copies scripts to `%USERPROFILE%\Scripts` and creates a desktop shortcut.
 
+It also builds the small control window with Windows' built-in .NET Framework C# compiler. Close the existing control window before reinstalling. To place the utility on another drive:
+
+```powershell
+powershell -NoProfile -File Install.ps1 -TargetDirectory G:\ScreenControl
+```
+
 ## Usage
 
 Run `TurnOffScreen.vbs` (double-click, shortcut, or hotkey). Run it again to restore.
+
+The original toggle behaviour remains the default. For explicit, repeatable operations:
+
+```powershell
+powershell -NoProfile -STA -File TurnOffScreen.ps1 -Action On
+powershell -NoProfile -STA -File TurnOffScreen.ps1 -Action Off
+powershell -NoProfile -STA -File TurnOffScreen.ps1 -Action Status
+powershell -NoProfile -STA -File MonitorPower.ps1 -Action Off
+powershell -NoProfile -STA -File MonitorPower.ps1 -Action Status -DelaySeconds 0 -ObserveSeconds 2
+powershell -NoProfile -STA -File RestoreScreen.ps1
+```
+
+`-NoBrightness` on the overlay forces desktop-style operation without changing a panel's brightness. This is also used by the desktop regression test. Explicit `On` never toggles an existing overlay off, and explicit `Off` never starts an overlay.
 
 ### How to tell from remote that it is on
 
@@ -105,6 +141,17 @@ process id on a 2-second timer and does exactly that when it changes, logging
 
 ## Tests
 
+Desktop/native tests (briefly blank the local displays and restore them automatically):
+
+```powershell
+powershell -NoProfile -STA -File tests\Test-NativeDisplay.ps1
+powershell -NoProfile -STA -File tests\Test-DesktopOverlay.ps1
+```
+
+The native test requires a real Windows `Off` notification, not just successful API delivery. The desktop overlay test covers operation without WMI brightness and repeated explicit On/Off calls. It refuses to disturb an overlay already running before the test.
+
+On the validated Windows 11 desktop, native standby and wake were confirmed on all three external displays. The control window's night/restore actions and the directly registered Ctrl+Alt+Shift+M hotkey were also exercised. An Explorer shortcut hotkey had not fired reliably there, so restore is registered by the overlay process itself.
+
 ```powershell
 # with the screen-off overlay NOT running (each test starts and stops its own):
 powershell -ExecutionPolicy Bypass -File tests\Test-OverlayReapply.ps1
@@ -132,7 +179,7 @@ the session as remote.
 ## Known limitations
 
 - Chrome Remote Desktop's sharing bar, IME candidate windows, and the mouse cursor may remain faintly visible at brightness 0 (they render above the overlay in z-order; hiding them breaks remote desktop)
-- Not a true DPMS off — the panel is still powered, just at minimum backlight with a black image
+- Overlay mode is not true DPMS off: the panel stays powered, and external-monitor backlights are not dimmed by WMI. Native mode requests display standby instead.
 - 64-bit PowerShell only (`GetWindowLongPtrW` is not exported on 32-bit)
 - Windows App / native RDP cannot hide this overlay the way Chrome Remote Desktop can; over RDP only the brightness is kept at 0
 
