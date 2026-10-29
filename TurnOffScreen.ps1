@@ -1,6 +1,14 @@
 param([ValidateSet('Toggle','On','Off','Status')][string]$Action='Toggle',[switch]$NoBrightness)
 if ([IntPtr]::Size -ne 8) { throw "This script requires 64-bit PowerShell." }
 $script:noBrightness=$NoBrightness.IsPresent
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class OverlayDpi {
+    [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+}
+'@
+[void][OverlayDpi]::SetThreadDpiAwarenessContext([IntPtr](-4))
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -208,12 +216,7 @@ if ($wmi) {
 }
 
 function Get-ScreenBounds {
-    $screens = [System.Windows.Forms.Screen]::AllScreens
-    $left   = ($screens | ForEach-Object { $_.Bounds.Left }   | Measure-Object -Minimum).Minimum
-    $top    = ($screens | ForEach-Object { $_.Bounds.Top }    | Measure-Object -Minimum).Minimum
-    $right  = ($screens | ForEach-Object { $_.Bounds.Right }  | Measure-Object -Maximum).Maximum
-    $bottom = ($screens | ForEach-Object { $_.Bounds.Bottom } | Measure-Object -Maximum).Maximum
-    @{ Left = $left; Top = $top; Width = $right - $left; Height = $bottom - $top }
+    @{ Left = [NativeHelper]::GetSystemMetrics(76); Top = [NativeHelper]::GetSystemMetrics(77); Width = [NativeHelper]::GetSystemMetrics(78); Height = [NativeHelper]::GetSystemMetrics(79) }
 }
 
 $bounds = Get-ScreenBounds
@@ -222,6 +225,8 @@ $script:form = New-Object OverlayWindow
 $script:form.RestoreRequested = [Action]{ [void]$script:evt.Set() }
 $script:form.Text = 'TurnOffScreen_Overlay_7F3A'
 $script:form.StartPosition = 'Manual'
+$script:form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
+$script:form.MaximumSize = New-Object System.Drawing.Size($bounds.Width, $bounds.Height)
 $script:form.Location = New-Object System.Drawing.Point($bounds.Left, $bounds.Top)
 $script:form.Size = New-Object System.Drawing.Size($bounds.Width, $bounds.Height)
 $script:form.BackColor = [System.Drawing.Color]::Black
@@ -234,8 +239,8 @@ if ($script:startRemote) { $script:form.Opacity = 0 }
 
 $script:form.Add_Shown({
     $script:hotkeyWindow=$script:form.Handle
-    $script:hotkeyRegistered=[NativeHelper]::RegisterHotKey($script:hotkeyWindow,9001,0x4007,0x4D)
-    if ($script:hotkeyRegistered) { Write-Log 'restore hotkey registered: Ctrl+Alt+Shift+M' }
+    $script:hotkeyRegistered=[NativeHelper]::RegisterHotKey($script:hotkeyWindow,9001,0x4003,0x4D)
+    if ($script:hotkeyRegistered) { Write-Log 'restore hotkey registered: Ctrl+Alt+M' }
     else { Write-Log 'restore hotkey unavailable'; Show-Notice 'Restore shortcut unavailable' 'Use the tray icon or Restore Screen shortcut to restore.' }
     if ($script:startRemote) {
         & $script:enterRemoteMode

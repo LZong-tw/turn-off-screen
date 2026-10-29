@@ -18,7 +18,7 @@ public class ScreenControl : Form {
         Button native=Button("真正關屏",27,112),night=Button("夜間黑幕",228,112),restore=Button("恢復螢幕",429,112);
         native.Click+=delegate{Launch("MonitorPower.ps1","-Action Off -DelaySeconds 2 -ObserveSeconds 5");};
         night.Click+=delegate{Launch("TurnOffScreen.ps1","-Action On");};restore.Click+=delegate{Launch("RestoreScreen.ps1","");};
-        Label detail=new Label();detail.Text="真正關屏：螢幕進入待機，移動滑鼠或按鍵可喚亮。\r\n夜間黑幕：保持黑色遮罩，遠端畫面可維持正常；不等於斷電。\r\n夜間黑幕請按 Ctrl + Alt + Shift + M，或按「恢復螢幕」解除。";detail.SetBounds(27,175,595,85);Controls.Add(detail);
+        Label detail=new Label();detail.Text="真正關屏：螢幕進入待機，移動滑鼠或按鍵可喚亮。\r\n夜間黑幕：保持黑色遮罩，遠端畫面可維持正常；不等於斷電。\r\n夜間黑幕請按 Ctrl + Alt + M，或按「恢復螢幕」解除。";detail.SetBounds(27,175,595,85);Controls.Add(detail);
         status.SetBounds(27,275,595,50);Controls.Add(status);
         timer.Interval=1000;timer.Tick+=delegate{RefreshOverlay();};Shown+=delegate{timer.Start();RefreshOverlay();};
         FormClosed+=delegate{timer.Dispose();if(notification!=IntPtr.Zero)UnregisterPowerSettingNotification(notification);};
@@ -29,6 +29,6 @@ public class ScreenControl : Form {
     protected override void OnHandleCreated(EventArgs e){base.OnHandleCreated(e);Guid g=new Guid("6fe69556-704a-47a0-8f24-c28d936fda47");notification=RegisterPowerSettingNotification(Handle,ref g,0);if(notification==IntPtr.Zero)display="無法讀取 Windows 狀態";}
     protected override void WndProc(ref Message m){if(m.Msg==0x218&&m.WParam.ToInt64()==0x8013&&m.LParam!=IntPtr.Zero){Guid g=(Guid)Marshal.PtrToStructure(m.LParam,typeof(Guid));if(g==new Guid("6fe69556-704a-47a0-8f24-c28d936fda47")&&Marshal.ReadInt32(m.LParam,16)>=4){int v=Marshal.ReadInt32(m.LParam,20);display=v==0?"已關閉":v==1?"亮起":v==2?"調暗":"未知";}}base.WndProc(ref m);}
     bool OverlayOn(){try{using(Mutex m=Mutex.OpenExisting(@"Global\TurnOffScreenMutex")){try{if(m.WaitOne(0)){m.ReleaseMutex();return false;}return true;}catch(AbandonedMutexException){m.ReleaseMutex();return false;}}}catch(WaitHandleCannotBeOpenedException){return false;}}
-    void RefreshOverlay(){status.Text="Windows 顯示狀態："+display+"　｜　夜間黑幕："+(OverlayOn()?"啟用中":"未啟用")+"\r\n關閉這個視窗不會解除黑幕；Ctrl + Alt + Shift + M 仍可恢復。";}
+    void RefreshOverlay(){status.Text="Windows 顯示狀態："+display+"　｜　夜間黑幕："+(OverlayOn()?"啟用中":"未啟用")+"\r\n關閉這個視窗不會解除黑幕；Ctrl + Alt + M 仍可恢復。";}
     [STAThread]public static void Main(){Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new ScreenControl());}
 }

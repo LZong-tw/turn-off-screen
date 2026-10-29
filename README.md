@@ -9,12 +9,12 @@ Install creates a **螢幕控制** (Screen Control) shortcut with three actions:
 | Action | Effect | Restore |
 |---|---|---|
 | 真正關屏 | Requests native display standby after two seconds; the computer keeps working | Move the mouse, press a key, or use Restore |
-| 夜間黑幕 | Keeps a black overlay on the local desktop; dims internal panels when WMI supports it | Restore button or **Ctrl+Alt+Shift+M** |
+| 夜間黑幕 | Keeps a black overlay on the local desktop; dims internal panels when WMI supports it | Restore button or **Ctrl+Alt+M** |
 | 恢復螢幕 | Explicitly dismisses the overlay and requests native display power on | Idempotent; safe to repeat |
 
 The window shows Windows display-power notifications separately from overlay state. A successful request is **not** treated as proof that physical monitors turned off: `MonitorPower.ps1` records actual Windows `On`/`Off`/`Dim` notifications, and hardware still needs a physical check. The native mode was physically verified on a three-external-monitor desktop.
 
-The overlay remains active if the control window closes. The overlay process directly registers **Ctrl+Alt+Shift+M** to restore, so this key does not depend on Explorer's desktop-shortcut registration or keeping the control window open. If another app owns the combination, a notification and log entry report the conflict; use the tray restore action or the **恢復螢幕** desktop shortcut instead.
+The overlay remains active if the control window closes. The overlay process directly registers **Ctrl+Alt+M** to restore, so this key does not depend on Explorer's desktop-shortcut registration or keeping the control window open. If another app owns the combination, a notification and log entry report the conflict; use the tray restore action or the **恢復螢幕** desktop shortcut instead.
 
 PowerToys Awake can prevent automatic display-off when **Keep screen on** is enabled. Keep Awake enabled if desired, but disable that separate display option; it overrides the display timeout without changing the power plan. This utility does not silently change PowerToys settings.
 
@@ -150,7 +150,7 @@ powershell -NoProfile -STA -File tests\Test-DesktopOverlay.ps1
 
 The native test requires a real Windows `Off` notification, not just successful API delivery. The desktop overlay test covers operation without WMI brightness and repeated explicit On/Off calls. It refuses to disturb an overlay already running before the test.
 
-On the validated Windows 11 desktop, native standby and wake were confirmed on all three external displays. The control window's night/restore actions and the directly registered Ctrl+Alt+Shift+M hotkey were also exercised. An Explorer shortcut hotkey had not fired reliably there, so restore is registered by the overlay process itself.
+On the validated Windows 11 desktop, native standby and wake were confirmed on all three external displays. The control window's night/restore actions and the directly registered Ctrl+Alt+M hotkey were also exercised. An Explorer shortcut hotkey had not fired reliably there, so restore is registered by the overlay process itself.
 
 ```powershell
 # with the screen-off overlay NOT running (each test starts and stops its own):
